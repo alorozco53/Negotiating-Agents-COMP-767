@@ -1,0 +1,29 @@
+{
+    "root": "/home/ml/aorozc2/rlproject/end-to-end-negotiator",
+    "program": "<python with no main file>",
+    "git": {
+        "remote": "https://github.com/facebookresearch/end-to-end-negotiator.git",
+        "commit": "62819d2683f5e0a15c3b63a5034f01c714118754"
+    },
+    "email": "alorozco.patriot53@gmail.com",
+    "startedAt": "2020-04-30T19:01:07.767747",
+    "host": "dp-gpu3",
+    "username": "aorozc2",
+    "executable": "/home/ml/aorozc2/anaconda3/envs/rlenv/bin/python",
+    "os": "Linux-4.4.0-174-generic-x86_64-with-debian-stretch-sid",
+    "python": "3.7.4",
+    "gpu": "GeForce GTX TITAN X",
+    "gpu_count": 2,
+    "cpu_count": 12,
+    "cuda": "10.1.168",
+    "args": [
+        "-f",
+        "/home/ml/aorozc2/.local/share/jupyter/runtime/kernel-8fb940f3-57ec-4a6b-9756-657efdd83bd2.json"
+    ],
+    "state": "running",
+    "jobType": null,
+    "mode": "run",
+    "name": "leafy-moon-5",
+    "project": "goal-based-negotiating-agents",
+    "heartbeatAt": "2020-04-30T19:01:12.085906"
+}

@@ -1,0 +1,194 @@
+diff --git a/src/agent.py b/src/agent.py
+index 6679d48..9c314a3 100644
+--- a/src/agent.py
++++ b/src/agent.py
+@@ -41,18 +41,22 @@ class Agent(object):
+ 
+ 
+ class RnnAgent(Agent):
+-    def __init__(self, model, args, name='Alice', allow_no_agreement=True, train=False, diverse=False):
++    def __init__(self, model, args, name='Alice', allow_no_agreement=True, train=False, diverse=False, engine=None):
+         super(RnnAgent, self).__init__()
+         self.model = model
+-        self.model.eval()
++        #self.model.eval()
+         self.args = args
++        self.train = train
+         self.name = name
+         self.human = False
+         self.domain = domain.get_domain(args.domain)
+         self.allow_no_agreement = allow_no_agreement
++        self.engine = engine
+ 
+         self.sel_model = utils.load_model(args.selection_model_file)
+         self.sel_model.eval()
++        self.t = 0
++        self.all_rewards = []
+ 
+ 
+     def _encode(self, inpt, dictionary):
+@@ -70,13 +74,47 @@ class RnnAgent(Agent):
+         self.ctx = self._encode(context, self.model.context_dict)
+         self.ctx_h = self.model.forward_context(Variable(self.ctx))
+         self.lang_h = self.model.zero_h(1, self.model.args.nhid_lang)
++        self.logprobs = []
+ 
+     def feed_partner_context(self, partner_context):
+         pass
+ 
+-    def update(self, agree, reward, choice=None, partner_choice=None,
+-            partner_input=None, max_partner_reward=None):
+-        pass
++    def update(self, agree, reward, choice=None, partner_choice=None, partner_input=None, max_partner_reward=None):
++        if True:
++            return
++        self.t += 1
++        if len(self.logprobs) == 0:
++            print('not updating')
++            return
++        print('updating')
++        
++        reward_agree = reward
++        partner_reward_agree = max_partner_reward
++
++        reward = reward if agree else 0
++        partner_reward = max_partner_reward if agree else 0
++
++        diff = reward - partner_reward
++        self.all_rewards.append(diff)
++
++        r = (diff - np.mean(self.all_rewards)) / max(1e-4, np.std(self.all_rewards))
++        g = Variable(torch.zeros(1, 1).fill_(r)).cuda()
++        rewards = []
++        for _ in self.logprobs:
++            rewards.insert(0, g)
++            g = g * self.args.gamma
++
++        loss = 0
++        for lp, r in zip(self.logprobs, rewards):
++            loss -= lp * r
++
++        #self.engine.rl_learning_train(loss)
++        self.engine.opt.zero_grad()
++        loss.backward()
++        nn.utils.clip_grad_norm(self.model.parameters(), self.args.rl_clip)
++        self.engine.opt.step()
++        self.model.eval()
++        
+ 
+     def read(self, inpt):
+         self.sents.append(Variable(self._encode(['THEM:'] + inpt, self.model.word_dict)))
+@@ -141,8 +179,14 @@ class RnnAgent(Agent):
+         return choices[idx.item()][:self.domain.selection_length()], logprob, p_agree.item()
+ 
+     def choose(self):
+-        choice, _, _ = self._choose()
++        if self.args.eps < np.random.rand():
++            choice, _, _ = self._choose(sample=False)
++        else:
++            choice, logprob, _ = self._choose(sample=True)
++            self.logprobs.append(logprob)
+         return choice
++        #choice, _, _ = self._choose()
++        #return choice
+ 
+ 
+ class HierarchicalAgent(RnnAgent):
+diff --git a/src/dialog.py b/src/dialog.py
+index 1364773..bb52242 100644
+--- a/src/dialog.py
++++ b/src/dialog.py
+@@ -166,7 +166,7 @@ class Dialog(object):
+         words_left = max_words
+         length = 0
+         expired = False
+-
++        
+         while True:
+             out = writer.write(max_words=words_left)
+             words_left -= len(out)
+@@ -192,13 +192,12 @@ class Dialog(object):
+ 
+             writer, reader = reader, writer
+ 
+-
+         choices = []
+         for agent in self.agents:
+             choice = agent.choose()
+             choices.append(choice)
+             logger.dump_choice(agent.name, choice[: self.domain.selection_length() // 2])
+-
++        
+         agree, rewards = self.domain.score_choices(choices, ctxs)
+         if expired:
+             agree = False
+diff --git a/src/engines/engine.py b/src/engines/engine.py
+index 6c1278c..9661095 100644
+--- a/src/engines/engine.py
++++ b/src/engines/engine.py
+@@ -28,13 +28,13 @@ import vis
+ class Criterion(object):
+     """Weighted CrossEntropyLoss."""
+     def __init__(self, dictionary, device_id=None, bad_toks=[], reduction='mean'):
+-        w = torch.Tensor(len(dictionary)).fill_(1)
++        self.w = torch.Tensor(len(dictionary)).fill_(1)
+         for tok in bad_toks:
+-            w[dictionary.get_idx(tok)] = 0.0
++            self.w[dictionary.get_idx(tok)] = 0.0
+         if device_id is not None:
+-            w = w.cuda(device_id)
++            self.w = w.cuda(device_id)
+         # https://pytorch.org/docs/stable/nn.html 
+-        self.crit = nn.CrossEntropyLoss(w, reduction=reduction)
++        self.crit = nn.CrossEntropyLoss(self.w, reduction=reduction)
+ 
+     def __call__(self, out, tgt):
+         return self.crit(out, tgt)
+diff --git a/src/engines/rnn_engine.py b/src/engines/rnn_engine.py
+index bc51068..3da0f2c 100644
+--- a/src/engines/rnn_engine.py
++++ b/src/engines/rnn_engine.py
+@@ -24,15 +24,28 @@ class RnnEngine(EngineBase):
+         out, sel_out = model(inpt, ctx)
+         return out, tgt, sel_out, sel_tgt
+ 
+-    def train_batch(self, batch):
++    def train_batch(self, batch, reward=0):
+         out, tgt, sel_out, sel_tgt = RnnEngine._forward(self.model, batch)
+         loss = self.crit(out, tgt)
+         loss += self.sel_crit(sel_out, sel_tgt) * self.model.args.sel_weight
++        loss += reward
++        self.opt.zero_grad()
++        loss.backward()
++        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip)
++        self.opt.step()
++        return out, loss.item()
++    
++    def rl_learning_train(self, reward):
++        out, tgt, sel_out, sel_tgt = RnnEngine._forward(self.model, batch)
++        loss = self.crit(out, tgt)
++        loss += self.sel_crit(sel_out, sel_tgt) * self.model.args.sel_weight
++        loss += reward
+         self.opt.zero_grad()
+         loss.backward()
+         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip)
+         self.opt.step()
+         return loss.item()
++        
+ 
+     def valid_batch(self, batch):
+         with torch.no_grad():
+diff --git a/src/models/__init__.py b/src/models/__init__.py
+index b73dbb3..186421b 100644
+--- a/src/models/__init__.py
++++ b/src/models/__init__.py
+@@ -16,7 +16,8 @@ MODELS = {
+     'latent_clustering_language_model': LatentClusteringLanguageModel,
+     'baseline_clustering_model': BaselineClusteringModel,
+     'selection_model': SelectionModel,
+-    'rnn_model': RnnModel,
++    'rnn_model': RnnModel#,
++#    'rl_model': RlModel
+ }
+ 
+ 
